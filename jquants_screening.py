@@ -292,22 +292,28 @@ def main():
     error_log_f.close()
 
     # --- 最終結果はキャッシュ全体(過去の実行分含む)から集計する ---
+    # candidates.csv に「候補ルール」列(フェーズ1(現行) / フェーズ1'のみ(自動判定) など)が
+    # あれば、そのまま出力に引き継ぐ(無ければ空欄。従来形式のcandidates.csvとの後方互換)。
+    has_rule_column = candidates and "候補ルール" in candidates[0]
+
     all_events = []
     total_with_data = 0
     for row in candidates:
         code = row["code"].strip()
         name = row.get("name", "").strip()
+        rule = row.get("候補ルール", "").strip() if has_rule_column else ""
         bars = load_cache(code)
         if not bars:
             continue
         total_with_data += 1
         events, _n_points = compute_new_highs(bars, analysis_start)
         for e in events:
-            all_events.append({"code": code, "name": name, **e})
+            all_events.append({"code": code, "name": name, "候補ルール": rule, **e})
 
     output_file = f"new_highs_{today:%Y%m%d}.csv"
+    fieldnames = ["code", "name", "候補ルール", "date", "high", "prior_52w_high"]
     with open(output_file, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=["code", "name", "date", "high", "prior_52w_high"])
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for e in sorted(all_events, key=lambda x: (x["code"], x["date"])):
             writer.writerow(e)
