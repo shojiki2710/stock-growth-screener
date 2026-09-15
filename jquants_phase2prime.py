@@ -295,56 +295,72 @@ def main():
 
     out_rows = [r for r in existing_rows if (r["code"], r["entry_date"]) in done_keys]
 
-    for i, ev in enumerate(events, 1):
+    # 銘柄コード単位でイベントをまとめる(1コード=1回のAPI取得で、その銘柄の全イベントを判定する)
+    by_code = {}
+    meta_by_key = {}
+    for ev in events:
         code = ev["code"].strip()
-        name = ev.get("name", "").strip()
-        rule = ev.get("候補ルール", "").strip()
         entry_date = ev["date"].strip()
-        entry_high_hint = float(ev["high"]) if ev.get("high") else None
-
         if (code, entry_date) in done_keys:
             continue
+        by_code.setdefault(code, []).append(entry_date)
+        meta_by_key[(code, entry_date)] = {
+            "name": ev.get("name", "").strip(),
+            "候補ルール": ev.get("候補ルール", "").strip(),
+            "entry_high": float(ev["high"]) if ev.get("high") else None,
+        }
 
-        print(f"[{i}/{len(events)}] {code} {name} (新高値更新日={entry_date}) 判定中...", end=" ", flush=True)
+    codes_sorted = sorted(by_code.keys())
+    print(f"取得対象: {len(codes_sorted)}銘柄(未判定の{sum(len(v) for v in by_code.values())}イベント分)\n")
 
-        entry_dt = datetime.strptime(entry_date, "%Y-%m-%d").date()
-        date_from = (entry_dt - timedelta(days=DAYS_BEFORE)).strftime("%Y%m%d")
-        date_to = (entry_dt + timedelta(days=DAYS_AFTER)).strftime("%Y%m%d")
+    fieldnames = ["code", "name", "候補ルール", "entry_date", "entry_high",
+                  "volume_ratio", "deviation_pct", "phase2_signal", "volume_note"]
 
+    for ci, code in enumerate(codes_sorted, 1):
+        entry_dates = by_code[code]
+        name = meta_by_key[(code, entry_dates[0])]["name"]
+        min_dt = min(datetime.strptime(d, "%Y-%m-%d").date() for d in entry_dates)
+        max_dt = max(datetime.strptime(d, "%Y-%m-%d").date() for d in entry_dates)
+        date_from = (min_dt - timedelta(days=DAYS_BEFORE)).strftime("%Y%m%d")
+        date_to = (max_dt + timedelta(days=DAYS_AFTER)).strftime("%Y%m%d")
+
+        print(f"[{ci}/{len(codes_sorted)}] {code} {name} ({len(entry_dates)}イベント) 取得中...", end=" ", flush=True)
         raw_bars = fetch_daily_bars(api_key, code, date_from, date_to, log)
+
         if not raw_bars:
             print("データ取得失敗")
-            out_rows.append({
-                "code": code, "name": name, "候補ルール": rule, "entry_date": entry_date,
-                "entry_high": entry_high_hint, "volume_ratio": "", "deviation_pct": "",
-                "phase2_signal": "取得失敗", "volume_note": "",
-            })
-            continue
-
-        bars = normalize_bars(raw_bars)
-        metrics = compute_phase2prime(bars, entry_date, entry_high_hint)
-        if metrics.get("error"):
-            print(f"判定不能({metrics['error']})")
-            phase2_signal = "判定不能"
-            volume_ratio = deviation_pct = ""
-            volume_note = ""
+            for d in entry_dates:
+                m = meta_by_key[(code, d)]
+                out_rows.append({
+                    "code": code, "name": m["name"], "候補ルール": m["候補ルール"], "entry_date": d,
+                    "entry_high": m["entry_high"], "volume_ratio": "", "deviation_pct": "",
+                    "phase2_signal": "取得失敗", "volume_note": "",
+                })
         else:
-            phase2_signal = metrics["phase2_signal"]
-            volume_ratio = metrics["volume_ratio"] if metrics["volume_ratio"] is not None else ""
-            deviation_pct = metrics["deviation_pct"] if metrics["deviation_pct"] is not None else ""
-            volume_note = metrics["volume_note"]
-            print(f"{phase2_signal} (乖離率={deviation_pct}%, 出来高倍率={volume_ratio})")
+            bars = normalize_bars(raw_bars)
+            signals = []
+            for d in entry_dates:
+                m = meta_by_key[(code, d)]
+                metrics = compute_phase2prime(bars, d, m["entry_high"])
+                if metrics.get("error"):
+                    phase2_signal = "判定不能"
+                    volume_ratio = deviation_pct = ""
+                    volume_note = ""
+                else:
+                    phase2_signal = metrics["phase2_signal"]
+                    volume_ratio = metrics["volume_ratio"] if metrics["volume_ratio"] is not None else ""
+                    deviation_pct = metrics["deviation_pct"] if metrics["deviation_pct"] is not None else ""
+                    volume_note = metrics["volume_note"]
+                out_rows.append({
+                    "code": code, "name": m["name"], "候補ルール": m["候補ルール"], "entry_date": d,
+                    "entry_high": m["entry_high"], "volume_ratio": volume_ratio,
+                    "deviation_pct": deviation_pct, "phase2_signal": phase2_signal,
+                    "volume_note": volume_note,
+                })
+                signals.append(phase2_signal)
+            print(", ".join(signals))
 
-        out_rows.append({
-            "code": code, "name": name, "候補ルール": rule, "entry_date": entry_date,
-            "entry_high": entry_high_hint, "volume_ratio": volume_ratio,
-            "deviation_pct": deviation_pct, "phase2_signal": phase2_signal,
-            "volume_note": volume_note,
-        })
-
-        # 途中経過を都度保存
-        fieldnames = ["code", "name", "候補ルール", "entry_date", "entry_high",
-                      "volume_ratio", "deviation_pct", "phase2_signal", "volume_note"]
+        # 途中経過を都度保存(中断・レート制限対策)
         with open(output_file, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=fieldnames)
             w.writeheader()
